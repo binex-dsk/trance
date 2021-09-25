@@ -1,0 +1,10 @@
+[Unit]
+Description=serve trance instance
+After=network.target
+
+[Service]
+EnvironmentFile=/etc/trance.conf
+ExecStart=/bin/sh -c '${BIN} -d "${DIR}" -p ${PORT} -s "${SEED}"'
+
+[Install]
+WantedBy=multi-user.target
