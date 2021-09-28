@@ -60,16 +60,16 @@ bool shortid_exists(char *shortid) {
     return exists(get_file_filename(shortid));
 }
 
-FILE *get_file(char *shortid, char *file, const char *mode) {
+char *get_file_filename_shortid(char *shortid, char *file) {
     char *full = malloc(strlen(shortid) + strlen(file) + 2);
     snprintf(full, strlen(shortid) + strlen(file) + 2, "%s/%s", shortid, file);
-    return fopen(get_file_filename(full), mode);
+    return get_file_filename(full);
 }
 
-FILE *get_del_file(char *shortid, char *file, const char *mode) {
+char *get_del_filename_shortid(char *shortid, char *file) {
     char *full = malloc(strlen(shortid) + strlen(file) + 2);
     snprintf(full, strlen(shortid) + strlen(file) + 2, "%s/%s", shortid, file);
-    return fopen(get_del_filename(full), mode);
+    return get_del_filename(full);
 }
 
 char *gen_random_shortid() {
@@ -112,23 +112,28 @@ void trim(char *str) {
     memmove(str, _str, len + 1);
 }
 
-void handle_post(struct mg_connection *nc, char *content, char *host, char *filename) {
+void handle_post(struct mg_connection *nc, struct mg_str content, char *host, char *filename) {
     char *shortid = gen_random_shortid();
-     if (strlen(filename) >= 255) {
+    if (strlen(filename) >= 255) {
         return mg_http_reply(nc, 413, "", "filename length can not exceed 255 characters");
+    } else if (strlen(filename) == 0) {
+        return mg_http_reply(nc, 400, "", "please provide a filename");
     }
 
     mkdir(get_file_filename(shortid), S_IRWXU);
     mkdir(get_del_filename(shortid), S_IRWXU);
 
-    FILE *url = get_file(shortid, filename, "w+");
-    fputs(content, url);
-    fclose(url);
+    const unsigned char *ucont = (unsigned char *) content.ptr;
+    if (!mg_file_write(get_file_filename_shortid(shortid, filename), ucont, content.len)) {
+        fprintf(stderr, "failed to write to file %s", get_file_filename_shortid(shortid, filename));
+        return mg_http_reply(nc, 500, "", "failed to write data");
+    }
 
-    FILE *del = get_del_file(shortid, filename, "w+");
     char *del_key = gen_del_key(shortid, filename);
-    fputs(del_key, del);
-    fclose(del);
+    if (!mg_file_write(get_del_filename_shortid(shortid, filename), del_key, strlen(del_key))) {
+        fprintf(stderr, "failed to write to file %s", get_del_filename_shortid(shortid, filename));
+        return mg_http_reply(nc, 500, "", "failed to write data");
+    }
 
     char *del_header = malloc(256);
     sprintf(del_header, "X-Delete-With: %s\r\n", del_key);
@@ -138,9 +143,10 @@ void handle_post(struct mg_connection *nc, char *content, char *host, char *file
 
 void handle_delete(struct mg_connection *nc, char *link, char *del_key) {
     if (file_exists(link)) {
-        FILE *del = fopen(get_del_filename(link), "r");
+        /*FILE *del = fopen(get_del_filename(link), "r");
         char *key = malloc(256);
-        fgets(key, 255, del);
+        fgets(key, 255, del);*/
+        char *key = mg_file_read(get_del_filename(link), NULL);
         if (strcmp(key, del_key) == 0) {
             remove(get_file_filename(link));
             remove(get_del_filename(link));
@@ -164,15 +170,22 @@ static void ev_handler(struct mg_connection *nc, int ev, void *p, void *f) {
         snprintf(uri, hm->uri.len + 1, "%s", hm->uri.ptr);
         trim(uri);
 
-        struct mg_str *mhost = mg_http_get_header(hm, "Host");
-        char *host = malloc(mhost->len + 1);
-        snprintf(host, mhost->len + 1, "%s", mhost->ptr);
+        struct mg_str *pmhost = mg_http_get_header(hm, "Host");
+        struct mg_str mhost;
+        if (pmhost == NULL) {
+            fprintf(stderr, "request sent with no Host header");
+            mhost = mg_str("<UNKNOWN DOMAIN>");
+        } else {
+            mhost = *pmhost;
+        }
+
+        char *host = malloc(mhost.len + 1);
+        snprintf(host, mhost.len + 1, "%s", mhost.ptr);
 
         char *body = strdup(hm->body.ptr);
 
-
         if (strncmp(hm->method.ptr, "POST", hm->method.len) == 0 || strncmp(hm->method.ptr, "PUT", hm->method.len) == 0) {
-            handle_post(nc, body, host, uri); // FIXME: return 400 on bad Content-Type
+            handle_post(nc, hm->body, host, uri); // FIXME: return 400 on bad Content-Type
         } else if (strncmp(hm->method.ptr, "DELETE", hm->method.len) == 0) {
             handle_delete(nc, uri, body);
         } else if (strncmp(hm->method.ptr, "GET", hm->method.len) == 0) {
