@@ -32,6 +32,7 @@ static void rec_mkdir(const char *dir) {
             mkdir(tmp, S_IRWXU);
             *p = '/';
         }
+
     mkdir(tmp, S_IRWXU);
 }
 
@@ -53,23 +54,26 @@ char *get_del_filename(char *path) {
 }
 
 bool file_exists(char *path) {
-    return exists(get_file_filename(path));
-}
-
-bool shortid_exists(char *shortid) {
-    return exists(get_file_filename(shortid));
+    char *filename = get_file_filename(path);
+    bool ret = exists(filename);
+    free(filename);
+    return ret;
 }
 
 char *get_file_filename_shortid(char *shortid, char *file) {
     char *full = malloc(strlen(shortid) + strlen(file) + 2);
     snprintf(full, strlen(shortid) + strlen(file) + 2, "%s/%s", shortid, file);
-    return get_file_filename(full);
+    char *ret = get_file_filename(full);
+    free(full);
+    return ret;
 }
 
 char *get_del_filename_shortid(char *shortid, char *file) {
     char *full = malloc(strlen(shortid) + strlen(file) + 2);
     snprintf(full, strlen(shortid) + strlen(file) + 2, "%s/%s", shortid, file);
-    return get_del_filename(full);
+    char *ret = get_del_filename(full);
+    free(full);
+    return ret;
 }
 
 char *gen_random_shortid() {
@@ -79,7 +83,7 @@ char *gen_random_shortid() {
         for(size_t i = 0; i < 16; ++i) {
             sprintf(shortid + i, "%x", rand() % 16);
         }
-    } while (shortid_exists(shortid));
+    } while (file_exists(shortid));
     return shortid;
 }
 
@@ -94,11 +98,14 @@ char *gen_del_key(char *shortid, char *file) {
     }
     rand_str[16] = 0;
     sprintf(salt, "$6$%s", rand_str);
+    free(rand_str);
 
     char *use_link = malloc(strlen(shortid) + strlen(file) + strlen(seed) + 1);
     sprintf(use_link, "%s%s%s", seed, shortid, file);
 
     char *del_key = crypt(use_link, salt);
+    free(salt);
+    free(use_link);
 
     return del_key;
 }
@@ -120,43 +127,57 @@ void handle_post(struct mg_connection *nc, struct mg_str content, char *host, ch
         return mg_http_reply(nc, 400, "", "please provide a filename");
     }
 
-    mkdir(get_file_filename(shortid), S_IRWXU);
-    mkdir(get_del_filename(shortid), S_IRWXU);
+    char *shortid_dir = get_file_filename(shortid);
+    char *shortid_del_dir = get_del_filename(shortid);
 
-    const unsigned char *ucont = (unsigned char *) content.ptr;
-    if (!mg_file_write(get_file_filename_shortid(shortid, filename), ucont, content.len)) {
-        fprintf(stderr, "failed to write to file %s", get_file_filename_shortid(shortid, filename));
+    mkdir(shortid_dir, S_IRWXU);
+    mkdir(shortid_del_dir, S_IRWXU);
+
+    free(shortid_dir);
+    free(shortid_del_dir);
+
+    unsigned char *ucont = (unsigned char *) content.ptr;
+    char *file = get_file_filename_shortid(shortid, filename);
+    if (!mg_file_write(file, ucont, content.len)) {
+        fprintf(stderr, "failed to write to file %s", file);
         return mg_http_reply(nc, 500, "", "failed to write data");
     }
+    free(file);
 
     char *del_key = gen_del_key(shortid, filename);
-    if (!mg_file_write(get_del_filename_shortid(shortid, filename), del_key, strlen(del_key))) {
-        fprintf(stderr, "failed to write to file %s", get_del_filename_shortid(shortid, filename));
+    char *del_file = get_del_filename_shortid(shortid, filename);
+    if (!mg_file_write(del_file, del_key, strlen(del_key))) {
+        fprintf(stderr, "failed to write to file %s", del_file);
         return mg_http_reply(nc, 500, "", "failed to write data");
     }
+    free(del_file);
 
     char *del_header = malloc(256);
     sprintf(del_header, "X-Delete-With: %s\r\n", del_key);
 
     mg_http_reply(nc, 201, del_header, "%s%s/%s/%s", proto, host, shortid, filename);
+
+    free(del_header);
+    free(shortid);
 }
 
 void handle_delete(struct mg_connection *nc, char *link, char *del_key) {
     if (file_exists(link)) {
-        /*FILE *del = fopen(get_del_filename(link), "r");
-        char *key = malloc(256);
-        fgets(key, 255, del);*/
-        char *key = mg_file_read(get_del_filename(link), NULL);
+        char *link_del_file = get_del_filename(link);
+        char *key = mg_file_read(link_del_file, NULL);
         if (strcmp(key, del_key) == 0) {
-            remove(get_file_filename(link));
-            remove(get_del_filename(link));
+#define remove_free(stmt) { char *tmp = stmt; remove(tmp); free(tmp); }
+            remove_free(link_del_file);
+            remove_free(get_del_filename(link));
             char *shortid = strtok(link, "/");
-            remove(get_file_filename(shortid));
-            remove(get_del_filename(shortid));
+            remove_free(get_file_filename(shortid));
+            remove_free(get_del_filename(shortid));
+#undef remove_free
             mg_http_reply(nc, 204, "", "");
         } else {
             mg_http_reply(nc, 403, "", "incorrect deletion key");
         }
+        free(key);
     } else {
         mg_http_reply(nc, 404, "", "this file does not exist");
     }
@@ -198,6 +219,10 @@ static void ev_handler(struct mg_connection *nc, int ev, void *p, void *f) {
         } else {
             mg_http_reply(nc, 405, "Allow: GET, PUT, POST, DELETE\r\n", "");
         }
+
+        free(uri);
+        free(host);
+        free(body);
     }
 }
 
@@ -252,8 +277,15 @@ int main(int argc, char *argv[]) {
         printf ("Non-option argument %s\n", argv[index]);
     }
 
-    rec_mkdir(strcat(strdup(data_dir), "/files"));
-    rec_mkdir(strcat(strdup(data_dir), "/del"));
+    char *files_dir = strcat(strdup(data_dir), "/files");
+    char *del_dir = strcat(strdup(data_dir), "/del");
+
+    rec_mkdir(files_dir);
+    rec_mkdir(del_dir);
+
+    free(files_dir);
+    free(del_dir);
+
     struct mg_mgr mgr;
     struct mg_connection *nc;
 
