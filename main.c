@@ -140,7 +140,8 @@ void handle_post(struct mg_connection *nc, struct mg_str content, char *host, ch
     char *file = get_file_filename_shortid(shortid, filename);
     if (!mg_file_write(file, ucont, content.len)) {
         fprintf(stderr, "failed to write to file %s", file);
-        return mg_http_reply(nc, 500, "", "failed to write data");
+        mg_http_reply(nc, 500, "", "failed to write data");
+        return free(shortid);
     }
     free(file);
 
@@ -148,7 +149,9 @@ void handle_post(struct mg_connection *nc, struct mg_str content, char *host, ch
     char *del_file = get_del_filename_shortid(shortid, filename);
     if (!mg_file_write(del_file, del_key, strlen(del_key))) {
         fprintf(stderr, "failed to write to file %s", del_file);
-        return mg_http_reply(nc, 500, "", "failed to write data");
+        mg_http_reply(nc, 500, "", "failed to write data");
+        free(shortid);
+        return free(del_file);
     }
     free(del_file);
 
